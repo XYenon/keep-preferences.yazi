@@ -37,6 +37,32 @@ Enable the plugin from `~/.config/yazi/init.lua`:
 require("keep-preferences"):setup()
 ```
 
+You can also override the defaults used for unvisited directories by matching the directory path:
+
+```lua
+require("keep-preferences"):setup({
+	path_preferences = {
+		{
+			path = "^/Users/me/Downloads",
+			defaults = {
+				sort_by = "mtime",
+				sort_reverse = true,
+				show_hidden = true,
+			},
+		},
+		{
+			path = "^/Users/me/Pictures",
+			defaults = {
+				linemode = "size",
+				ratio = { 1, 3, 4 },
+			},
+		},
+	},
+})
+```
+
+Path rules use Lua patterns and are applied on top of the global `[mgr]` defaults in order. If multiple rules match, later array entries override earlier ones. Once a directory has been visited in a tab, its recorded preferences take precedence over these path preferences.
+
 ## Notes
 
 - `ratio` is global in Yazi, not tab-local. This plugin reapplies the active tab's recorded ratio whenever it restores a directory.

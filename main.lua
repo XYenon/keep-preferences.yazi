@@ -3,17 +3,22 @@
 ---@alias KeepPreferencesRatio { [1]: integer, [2]: integer, [3]: integer }
 ---@alias KeepPreferencesSortBy "none"|"mtime"|"btime"|"extension"|"alphabetical"|"natural"|"size"|"random"
 ---@alias KeepPreferencesPref { ratio: KeepPreferencesRatio, sort_by: KeepPreferencesSortBy, sort_sensitive: boolean, sort_reverse: boolean, sort_dir_first: boolean, sort_translit: boolean, linemode: string, show_hidden: boolean }
+---@alias KeepPreferencesPrefPatch { ratio?: KeepPreferencesRatio|table, sort_by?: KeepPreferencesSortBy, sort_sensitive?: boolean, sort_reverse?: boolean, sort_dir_first?: boolean, sort_translit?: boolean, linemode?: string, show_hidden?: boolean }
+---@alias KeepPreferencesPathPreference { path: string, defaults: KeepPreferencesPrefPatch }
+---@alias KeepPreferencesSetupOpts { path_preferences?: KeepPreferencesPathPreference[] }
 ---@alias KeepPreferencesSortForm { [1]?: KeepPreferencesSortBy, by?: KeepPreferencesSortBy, sensitive?: boolean, reverse?: boolean, dir_first?: boolean, ["dir-first"]?: boolean, translit?: boolean }
 ---@alias KeepPreferencesHiddenForm { [1]?: "show"|"hide"|"toggle", state?: "show"|"hide"|"toggle" }
 
 -- Plugin state layout:
 --   default: KeepPreferencesPref copied from yazi.toml's [mgr] at setup time.
+--   path_preferences: array<{ path: string, defaults: KeepPreferencesPrefPatch }>; path-specific default overrides.
 --   tabs:    table<tab-id, table<cwd, KeepPreferencesPref>>; all directory records are tab-local.
 --   last:    table<tab-id, cwd>; used to save the directory being left before applying the next one.
 --   applying: true while this plugin is restoring state, so restore-triggered sort/hidden events are ignored.
 --   restoring: table<tab-id, { cwd: string, pref: KeepPreferencesPref }>; protects restored state from stale hover events.
 local STATE = {
 	default = "default",
+	path_preferences = "path_preferences",
 	tabs = "tabs",
 	last = "last",
 	applying = "applying",
@@ -55,6 +60,46 @@ local function clone_pref(pref)
 		linemode = pref.linemode,
 		show_hidden = pref.show_hidden,
 	}
+end
+
+---@param pref KeepPreferencesPref|KeepPreferencesPrefPatch Preference to update.
+---@param patch KeepPreferencesPrefPatch Preference fields to copy.
+---@return boolean changed Whether at least one supported field was copied.
+local function apply_pref_patch(pref, patch)
+	local changed = false
+	if type(patch.ratio) == "table" then
+		pref.ratio = clone_ratio(patch.ratio)
+		changed = true
+	end
+	if type(patch.sort_by) == "string" then
+		pref.sort_by = patch.sort_by
+		changed = true
+	end
+	if type(patch.sort_sensitive) == "boolean" then
+		pref.sort_sensitive = patch.sort_sensitive
+		changed = true
+	end
+	if type(patch.sort_reverse) == "boolean" then
+		pref.sort_reverse = patch.sort_reverse
+		changed = true
+	end
+	if type(patch.sort_dir_first) == "boolean" then
+		pref.sort_dir_first = patch.sort_dir_first
+		changed = true
+	end
+	if type(patch.sort_translit) == "boolean" then
+		pref.sort_translit = patch.sort_translit
+		changed = true
+	end
+	if type(patch.linemode) == "string" then
+		pref.linemode = patch.linemode
+		changed = true
+	end
+	if type(patch.show_hidden) == "boolean" then
+		pref.show_hidden = patch.show_hidden
+		changed = true
+	end
+	return changed
 end
 
 ---@param a KeepPreferencesPref
@@ -223,11 +268,38 @@ local function apply_hidden_form(pref, opt)
 	return mode
 end
 
+---@param path string Path pattern configured by the user.
+---@param cwd string Directory key to test.
+---@return boolean matched Whether the path pattern matched the cwd.
+local function path_matches(path, cwd)
+	local ok, matched = pcall(string.find, cwd, path)
+	if not ok then
+		ya.dbg(PLUGIN, "invalid path preference pattern", path, tostring(matched))
+		return false
+	end
+	return matched ~= nil
+end
+
+---@param state table Plugin state provided by `ya.sync`.
+---@param cwd string Directory key.
+---@return KeepPreferencesPref pref Default preference with matching path overrides applied.
+local function default_for_cwd(state, cwd)
+	local pref = clone_pref(state[STATE.default])
+	for _, rule in ipairs(state[STATE.path_preferences] or {}) do
+		if type(rule.path) == "string" and type(rule.defaults) == "table" and path_matches(rule.path, cwd) then
+			apply_pref_patch(pref, rule.defaults)
+			ya.dbg(PLUGIN, "path preferences matched", "cwd", cwd, "path", rule.path, "pref", pref_text(pref))
+		end
+	end
+	return pref
+end
+
 ---Initialize default preferences and cache buckets.
 ---The default preference is intentionally copied from `rt.mgr`, so unvisited directories
 ---use the user's yazi.toml defaults instead of inheriting changes from the previous directory.
 ---Do not touch `cx` here: `setup()` runs while the UI context is not available yet.
-local set_defaults = ya.sync(function(state)
+---@param opts KeepPreferencesSetupOpts?
+local set_defaults = ya.sync(function(state, opts)
 	state[STATE.default] = {
 		ratio = clone_ratio(rt.mgr.ratio),
 		sort_by = rt.mgr.sort_by,
@@ -238,10 +310,20 @@ local set_defaults = ya.sync(function(state)
 		linemode = rt.mgr.linemode,
 		show_hidden = rt.mgr.show_hidden,
 	}
+	state[STATE.path_preferences] = type(opts) == "table"
+			and type(opts.path_preferences) == "table"
+			and opts.path_preferences
+		or {}
 	state[STATE.tabs] = state[STATE.tabs] or {}
 	state[STATE.last] = state[STATE.last] or {}
 	state[STATE.restoring] = state[STATE.restoring] or {}
-	ya.dbg(PLUGIN, "setup defaults", pref_text(state[STATE.default]))
+	ya.dbg(
+		PLUGIN,
+		"setup defaults",
+		pref_text(state[STATE.default]),
+		"path preferences",
+		tostring(#state[STATE.path_preferences])
+	)
 end)
 
 ---Save the active directory's current preference into the current tab's cache.
@@ -377,8 +459,9 @@ local pref_for_current = ya.sync(function(state)
 		return pref
 	end
 
-	ya.dbg(PLUGIN, "cache miss, use defaults", "tab", id, "cwd", cwd, pref_text(state[STATE.default]))
-	return state[STATE.default]
+	local default = default_for_cwd(state, cwd)
+	ya.dbg(PLUGIN, "cache miss, use defaults", "tab", id, "cwd", cwd, pref_text(default))
+	return default
 end)
 
 ---Apply a cached preference to the active tab/directory.
@@ -430,9 +513,10 @@ end
 
 local M = {}
 
-function M:setup()
+---@param opts KeepPreferencesSetupOpts?
+function M:setup(opts)
 	ya.dbg(PLUGIN, "setup")
-	set_defaults()
+	set_defaults(opts)
 
 	-- Directory changes are the main restore point. `pref_for_current()` records the directory
 	-- being left before returning the preference for the newly active directory.
