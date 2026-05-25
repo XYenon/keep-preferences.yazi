@@ -264,6 +264,8 @@ local function apply_hidden_form(pref, opt)
 		pref.show_hidden = false
 	elseif mode == "toggle" then
 		pref.show_hidden = not pref.show_hidden
+	else
+		return nil
 	end
 	return mode
 end

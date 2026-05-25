@@ -84,7 +84,9 @@ These are Yazi runtime details that shaped the implementation:
 
 - `setup()` runs before `cx` is available. Only read `rt.mgr` defaults there; defer active tab/CWD access until events such as `cd`, `tab`, `load`, or `hover`.
 - New tabs can inherit the previously active tab's runtime preferences before plugin events run. Do not save state for a tab until it has gone through the plugin's restore path.
-- Yazi may fire internal `sort` preflight hooks with omitted fields represented as light userdata, not `nil`. Only persist sort fields whose values are concrete Lua strings/booleans, otherwise `ya.emit("sort", ...)` can later fail with `light userdata is not supported`.
+- Yazi may fire internal `sort` preflight hooks with omitted fields. Only persist sort fields whose values are concrete Lua strings/booleans, otherwise `ya.emit("sort", ...)` can later fail on non-concrete values such as light userdata.
+- `sort_by = "none"` is a valid concrete sort mode, and `linemode = "none"` is a valid concrete linemode. Do not treat these values as omitted fields.
+- `hidden` preflight hooks can carry `state = "none"`, which means "leave the current hidden state unchanged". Do not cache it as a user preference change; only `show`, `hide`, and `toggle` are concrete hidden actions.
 - Navigation can trigger internal sort hooks before the `cd` event for the destination directory. Sort hooks with no concrete changed fields must be ignored, or they can accidentally cache the source directory's state for the destination.
 - `ya.emit("hidden", ...)` is not immediately reflected in `cx.active.pref.show_hidden`. A `hover` event right after restore may still see stale state, so the plugin protects the expected restored preference until the runtime state settles.
 - `key-sort`/`ind-sort` and `key-hidden`/`ind-hidden` are preflight hooks. Always return the original form when not cancelling, so Yazi can continue the original action.
