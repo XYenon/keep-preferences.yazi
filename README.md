@@ -37,7 +37,9 @@ Enable the plugin from `~/.config/yazi/init.lua`:
 require("keep-preferences"):setup()
 ```
 
-You can also override the defaults used for unvisited directories by matching the directory path:
+### Path-specific defaults
+
+You can override the defaults used for unvisited directories by matching the directory path:
 
 ```lua
 require("keep-preferences"):setup({
@@ -62,6 +64,18 @@ require("keep-preferences"):setup({
 ```
 
 Path rules use Lua patterns and are applied on top of the global `[mgr]` defaults in order. If multiple rules match, later array entries override earlier ones. Once a directory has been visited in a tab, its recorded preferences take precedence over these path preferences.
+
+### Sticky fields (native behavior)
+
+By default every tracked field is restored per directory. To keep Yazi's native behavior for specific fields — they stay as you left them and do **not** change when you enter another directory — list them in `sticky`. Any tracked field can be sticky:
+
+```lua
+require("keep-preferences"):setup({
+	sticky = { "show_hidden", "linemode" },
+})
+```
+
+Sticky fields are still initialized once when a tab is first created (from `[mgr]` / path defaults), so a new tab does not inherit the previous tab's runtime values. After that, changing directory no longer rewrites those fields; only your own actions (for example toggling hidden files) update them.
 
 ## Notes
 
@@ -89,4 +103,6 @@ These are Yazi runtime details that shaped the implementation:
 - `hidden` preflight hooks can carry `state = "none"`, which means "leave the current hidden state unchanged". Do not cache it as a user preference change; only `show`, `hide`, and `toggle` are concrete hidden actions.
 - Navigation can trigger internal sort hooks before the `cd` event for the destination directory. Sort hooks with no concrete changed fields must be ignored, or they can accidentally cache the source directory's state for the destination.
 - `ya.emit("hidden", ...)` is not immediately reflected in `cx.active.pref.show_hidden`. A `hover` event right after restore may still see stale state, so the plugin protects the expected restored preference until the runtime state settles.
+- Sticky fields must be merged from the current runtime into the protected restore preference. Otherwise a skipped sticky field can disagree with the cache/default snapshot and the hover guard will treat later passive events as stale forever.
+- Sticky fields are still force-applied on a tab's first restore so a new tab starts from configured defaults instead of inheriting the previous tab.
 - `key-sort`/`ind-sort` and `key-hidden`/`ind-hidden` are preflight hooks. Always return the original form when not cancelling, so Yazi can continue the original action.
