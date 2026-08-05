@@ -2,7 +2,7 @@
 
 Keep Yazi manager preferences per tab and per directory.
 
-Requires Yazi 26.1.22 or newer.
+Requires Yazi 26.5.6 or newer.
 
 When you enter a directory for the first time in the current tab, the plugin restores the defaults from `[mgr]` in `yazi.toml`. When you enter a directory that has already been seen in that tab, the plugin restores the previously recorded state for that directory.
 
@@ -14,6 +14,7 @@ Tracked state:
 - `sort_reverse`
 - `sort_dir_first`
 - `sort_translit`
+- `sort_fallback`
 - `linemode`
 - `show_hidden`
 

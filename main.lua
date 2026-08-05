@@ -1,13 +1,14 @@
---- @since 26.1.22
+--- @since 26.5.6
 
 ---@alias KeepPreferencesRatio { [1]: integer, [2]: integer, [3]: integer }
 ---@alias KeepPreferencesSortBy "none"|"mtime"|"btime"|"extension"|"alphabetical"|"natural"|"size"|"random"
----@alias KeepPreferencesField "ratio"|"sort_by"|"sort_sensitive"|"sort_reverse"|"sort_dir_first"|"sort_translit"|"linemode"|"show_hidden"
----@alias KeepPreferencesPref { ratio: KeepPreferencesRatio, sort_by: KeepPreferencesSortBy, sort_sensitive: boolean, sort_reverse: boolean, sort_dir_first: boolean, sort_translit: boolean, linemode: string, show_hidden: boolean }
----@alias KeepPreferencesPrefPatch { ratio?: KeepPreferencesRatio|table, sort_by?: KeepPreferencesSortBy, sort_sensitive?: boolean, sort_reverse?: boolean, sort_dir_first?: boolean, sort_translit?: boolean, linemode?: string, show_hidden?: boolean }
+---@alias KeepPreferencesSortFallback "alphabetical"|"natural"
+---@alias KeepPreferencesField "ratio"|"sort_by"|"sort_sensitive"|"sort_reverse"|"sort_dir_first"|"sort_translit"|"sort_fallback"|"linemode"|"show_hidden"
+---@alias KeepPreferencesPref { ratio: KeepPreferencesRatio, sort_by: KeepPreferencesSortBy, sort_sensitive: boolean, sort_reverse: boolean, sort_dir_first: boolean, sort_translit: boolean, sort_fallback: KeepPreferencesSortFallback, linemode: string, show_hidden: boolean }
+---@alias KeepPreferencesPrefPatch { ratio?: KeepPreferencesRatio|table, sort_by?: KeepPreferencesSortBy, sort_sensitive?: boolean, sort_reverse?: boolean, sort_dir_first?: boolean, sort_translit?: boolean, sort_fallback?: KeepPreferencesSortFallback, linemode?: string, show_hidden?: boolean }
 ---@alias KeepPreferencesPathPreference { path: string, defaults: KeepPreferencesPrefPatch }
 ---@alias KeepPreferencesSetupOpts { path_preferences?: KeepPreferencesPathPreference[], sticky?: KeepPreferencesField[] }
----@alias KeepPreferencesSortForm { [1]?: KeepPreferencesSortBy, by?: KeepPreferencesSortBy, sensitive?: boolean, reverse?: boolean, dir_first?: boolean, ["dir-first"]?: boolean, translit?: boolean }
+---@alias KeepPreferencesSortForm { [1]?: KeepPreferencesSortBy, by?: KeepPreferencesSortBy, sensitive?: boolean, reverse?: boolean, dir_first?: boolean, ["dir-first"]?: boolean, translit?: boolean, fallback?: KeepPreferencesSortFallback }
 ---@alias KeepPreferencesHiddenForm { [1]?: "show"|"hide"|"toggle", state?: "show"|"hide"|"toggle" }
 
 -- Plugin state layout:
@@ -31,15 +32,14 @@ local STATE = {
 local PLUGIN = "keep-preferences"
 
 ---Return a plain 3-item ratio array accepted by `rt.mgr.ratio = ...`.
----Yazi exposes `rt.mgr.ratio` as a named table (`parent/current/preview/all`),
----while the setter expects only parent/current/preview.
+---Stable Yazi exposes named ratio fields, while nightly exposes indexed fields.
 ---@param ratio table Yazi ratio table or a 3-item ratio array.
 ---@return KeepPreferencesRatio
 local function clone_ratio(ratio)
 	return {
-		ratio.parent or ratio[1] or 1,
-		ratio.current or ratio[2] or 4,
-		ratio.preview or ratio[3] or 3,
+		ratio[1] or ratio.parent or 1,
+		ratio[2] or ratio.current or 4,
+		ratio[3] or ratio.preview or 3,
 	}
 end
 
@@ -60,6 +60,7 @@ local function clone_pref(pref)
 		sort_reverse = pref.sort_reverse,
 		sort_dir_first = pref.sort_dir_first,
 		sort_translit = pref.sort_translit,
+		sort_fallback = pref.sort_fallback,
 		linemode = pref.linemode,
 		show_hidden = pref.show_hidden,
 	}
@@ -94,6 +95,10 @@ local function apply_pref_patch(pref, patch)
 		pref.sort_translit = patch.sort_translit
 		changed = true
 	end
+	if type(patch.sort_fallback) == "string" then
+		pref.sort_fallback = patch.sort_fallback
+		changed = true
+	end
 	if type(patch.linemode) == "string" then
 		pref.linemode = patch.linemode
 		changed = true
@@ -118,6 +123,7 @@ local function same_pref(a, b)
 		and a.sort_reverse == b.sort_reverse
 		and a.sort_dir_first == b.sort_dir_first
 		and a.sort_translit == b.sort_translit
+		and a.sort_fallback == b.sort_fallback
 		and a.linemode == b.linemode
 		and a.show_hidden == b.show_hidden
 end
@@ -129,13 +135,14 @@ local function pref_text(pref)
 		return "nil"
 	end
 	return string.format(
-		"ratio=%s sort=%s sensitive=%s reverse=%s dir_first=%s translit=%s linemode=%s hidden=%s",
+		"ratio=%s sort=%s sensitive=%s reverse=%s dir_first=%s translit=%s fallback=%s linemode=%s hidden=%s",
 		ratio_text(pref.ratio),
 		tostring(pref.sort_by),
 		tostring(pref.sort_sensitive),
 		tostring(pref.sort_reverse),
 		tostring(pref.sort_dir_first),
 		tostring(pref.sort_translit),
+		tostring(pref.sort_fallback),
 		tostring(pref.linemode),
 		tostring(pref.show_hidden)
 	)
@@ -194,6 +201,9 @@ local function keep_sticky_fields(sticky, target, source)
 	if sticky.sort_translit then
 		target.sort_translit = source.sort_translit
 	end
+	if sticky.sort_fallback then
+		target.sort_fallback = source.sort_fallback
+	end
 	if sticky.linemode then
 		target.linemode = source.linemode
 	end
@@ -221,7 +231,9 @@ end
 ---@return string
 local function cwd_key()
 	local url = cx.active.current.cwd
-	local is_virtual = Url(url).scheme and Url(url).scheme.is_virtual
+	local cloned = Url(url)
+	local spec = cloned.spec or cloned.scheme
+	local is_virtual = spec and spec.is_virtual
 	return tostring((is_virtual and url or url.path) or url)
 end
 
@@ -236,6 +248,7 @@ local function current_state()
 		sort_reverse = cx.active.pref.sort_reverse,
 		sort_dir_first = cx.active.pref.sort_dir_first,
 		sort_translit = cx.active.pref.sort_translit,
+		sort_fallback = cx.active.pref.sort_fallback,
 		linemode = cx.active.pref.linemode,
 		show_hidden = cx.active.pref.show_hidden,
 	}
@@ -274,6 +287,10 @@ local function sort_form(pref, sticky, force_all)
 	end
 	if take("sort_translit") then
 		form.translit = pref.sort_translit
+		any = true
+	end
+	if take("sort_fallback") then
+		form.fallback = pref.sort_fallback
 		any = true
 	end
 	return form, any
@@ -334,6 +351,10 @@ local function apply_sort_form(pref, opt)
 	end
 	if type(opt.translit) == "boolean" then
 		pref.sort_translit = opt.translit
+		changed = true
+	end
+	if type(opt.fallback) == "string" then
+		pref.sort_fallback = opt.fallback
 		changed = true
 	end
 	return changed
@@ -398,6 +419,7 @@ local set_defaults = ya.sync(function(state, opts)
 		sort_reverse = rt.mgr.sort_reverse,
 		sort_dir_first = rt.mgr.sort_dir_first,
 		sort_translit = rt.mgr.sort_translit,
+		sort_fallback = rt.mgr.sort_fallback,
 		linemode = rt.mgr.linemode,
 		show_hidden = rt.mgr.show_hidden,
 	}
