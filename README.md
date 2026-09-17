@@ -38,6 +38,17 @@ Enable the plugin from `~/.config/yazi/init.lua`:
 require("keep-preferences"):setup()
 ```
 
+To make directory previews use the previewed directory's own saved/path-specific preferences, add the plugin as the folder previewer in `~/.config/yazi/yazi.toml`:
+
+```toml
+[plugin]
+prepend_previewers = [
+	{ mime = "folder/*", run = "keep-preferences" },
+]
+```
+
+The preview follows `sort_*`, `linemode`, and `show_hidden` without changing the preferences of the directory you are currently browsing.
+
 ### Path-specific defaults
 
 You can override the defaults used for unvisited directories by matching the directory path:
@@ -81,6 +92,7 @@ Sticky fields are still initialized once when a tab is first created (from `[mgr
 ## Notes
 
 - `ratio` is global in Yazi, not tab-local. This plugin reapplies the active tab's recorded ratio whenever it restores a directory.
+- Directory preview sorting is implemented in Lua because Yazi does not expose its internal folder sorter to previewer plugins. `sort_translit` is therefore not applied in the preview; all other tracked sorting fields are supported.
 - Yazi does not currently provide `linemode`/`ratio` change hooks. Changes to those values are captured on the next observed event such as hover or directory change.
 
 ## Development
