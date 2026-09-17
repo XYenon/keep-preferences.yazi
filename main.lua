@@ -226,15 +226,22 @@ local function tab_id()
 	return tostring(cx.tabs.idx)
 end
 
----Return the active directory key used in the per-tab cache.
+---Return the cache key for a directory URL.
 ---For normal filesystem URLs this uses the path; for virtual URLs it keeps the full URL string.
+---@param url Url
 ---@return string
-local function cwd_key()
-	local url = cx.active.current.cwd
+local function url_key(url)
 	local cloned = Url(url)
 	local spec = cloned.spec or cloned.scheme
 	local is_virtual = spec and spec.is_virtual
 	return tostring((is_virtual and url or url.path) or url)
+end
+
+---Return the active directory key used in the per-tab cache.
+---For normal filesystem URLs this uses the path; for virtual URLs it keeps the full URL string.
+---@return string
+local function cwd_key()
+	return url_key(cx.active.current.cwd)
 end
 
 ---Capture the currently active manager state.
@@ -405,6 +412,328 @@ local function default_for_cwd(state, cwd)
 	end
 	return pref
 end
+
+---Return the effective preference for a directory shown in the preview pane.
+---Sticky fields follow the active tab's runtime state, just as they do during a normal restore.
+---@param state table Plugin state provided by `ya.sync`.
+---@param cwd string Directory key being previewed.
+---@return KeepPreferencesPref
+local pref_for_preview = ya.sync(function(state, cwd)
+	local id = tab_id()
+	local tabs = state[STATE.tabs] and state[STATE.tabs][id]
+	local pref = clone_pref((tabs and tabs[cwd]) or default_for_cwd(state, cwd))
+	keep_sticky_fields(state[STATE.sticky] or {}, pref, current_state())
+	return pref
+end)
+
+---Return the active preview offset from the sync UI context.
+---@return integer
+local preview_skip = ya.sync(function()
+	return cx.active.preview.skip
+end)
+
+---@param byte integer?
+---@return boolean
+local function is_ascii_space(byte)
+	return byte == 32 or (byte ~= nil and byte >= 9 and byte <= 13)
+end
+
+---@param byte integer?
+---@return boolean
+local function is_ascii_digit(byte)
+	return byte ~= nil and byte >= 48 and byte <= 57
+end
+
+---@param byte integer
+---@return integer
+local function ascii_lower(byte)
+	return byte >= 65 and byte <= 90 and byte + 32 or byte
+end
+
+---Compare strings using Yazi's byte-oriented alphabetical semantics.
+---@param a string
+---@param b string
+---@param sensitive boolean
+---@return integer ordering -1, 0, or 1.
+local function compare_alphabetical(a, b, sensitive)
+	local len = math.min(#a, #b)
+	for i = 1, len do
+		local av, bv = a:byte(i), b:byte(i)
+		if not sensitive then
+			av, bv = ascii_lower(av), ascii_lower(bv)
+		end
+		if av ~= bv then
+			return av < bv and -1 or 1
+		end
+	end
+	if #a == #b then
+		return 0
+	end
+	return #a < #b and -1 or 1
+end
+
+---@param a string
+---@param ai integer
+---@param b string
+---@param bi integer
+---@return integer ordering
+local function compare_left_digits(a, ai, b, bi)
+	while true do
+		local av, bv = a:byte(ai), b:byte(bi)
+		local ad, bd = is_ascii_digit(av), is_ascii_digit(bv)
+		if not ad or not bd then
+			if ad == bd then
+				return 0
+			end
+			return ad and 1 or -1
+		elseif av ~= bv then
+			return av < bv and -1 or 1
+		end
+		ai, bi = ai + 1, bi + 1
+	end
+end
+
+---@param a string
+---@param ai integer
+---@param b string
+---@param bi integer
+---@return integer ordering
+local function compare_right_digits(a, ai, b, bi)
+	local bias = 0
+	while true do
+		local av, bv = a:byte(ai), b:byte(bi)
+		local ad, bd = is_ascii_digit(av), is_ascii_digit(bv)
+		if not ad or not bd then
+			if ad ~= bd then
+				return ad and 1 or -1
+			end
+			return bias
+		elseif bias == 0 and av ~= bv then
+			bias = av < bv and -1 or 1
+		end
+		ai, bi = ai + 1, bi + 1
+	end
+end
+
+---Compare strings using Yazi's natural-sort rules for ASCII whitespace, digits, and case.
+---@param a string
+---@param b string
+---@param sensitive boolean
+---@return integer ordering -1, 0, or 1.
+local function compare_natural(a, b, sensitive)
+	local ai, bi = 1, 1
+	while true do
+		while is_ascii_space(a:byte(ai)) do
+			ai = ai + 1
+		end
+		while is_ascii_space(b:byte(bi)) do
+			bi = bi + 1
+		end
+
+		local av, bv = a:byte(ai), b:byte(bi)
+		if is_ascii_digit(av) and is_ascii_digit(bv) then
+			local ordering
+			if av == 48 or bv == 48 then
+				ordering = compare_left_digits(a, ai, b, bi)
+			else
+				ordering = compare_right_digits(a, ai, b, bi)
+			end
+			if ordering ~= 0 then
+				return ordering
+			end
+			while is_ascii_digit(a:byte(ai)) do
+				ai = ai + 1
+			end
+			while is_ascii_digit(b:byte(bi)) do
+				bi = bi + 1
+			end
+			av, bv = a:byte(ai), b:byte(bi)
+		end
+
+		if av == nil or bv == nil then
+			if av == bv then
+				return 0
+			end
+			return av == nil and -1 or 1
+		end
+		if not sensitive then
+			av, bv = ascii_lower(av), ascii_lower(bv)
+		end
+		if av ~= bv then
+			return av < bv and -1 or 1
+		end
+		ai, bi = ai + 1, bi + 1
+	end
+end
+
+---@param file File
+---@return string?
+local function file_extension(file)
+	if file.cha.is_dir then
+		return nil
+	end
+	local dot = file.name:match("^.*()%.")
+	if not dot or dot == 1 then
+		return nil
+	end
+	return file.name:sub(dot + 1)
+end
+
+---@param a File
+---@param b File
+---@param pref KeepPreferencesPref
+---@return integer ordering -1, 0, or 1.
+local function compare_files(a, b, pref)
+	if pref.sort_dir_first and a.cha.is_dir ~= b.cha.is_dir then
+		return a.cha.is_dir and -1 or 1
+	end
+
+	local by = pref.sort_by
+	local ordering = 0
+	if by == "mtime" then
+		local av, bv = a.cha.mtime or 0, b.cha.mtime or 0
+		ordering = av == bv and 0 or av < bv and -1 or 1
+	elseif by == "btime" then
+		local av, bv = a.cha.btime or 0, b.cha.btime or 0
+		ordering = av == bv and 0 or av < bv and -1 or 1
+	elseif by == "extension" then
+		local av, bv = file_extension(a), file_extension(b)
+		if av == nil or bv == nil then
+			ordering = av == bv and 0 or av == nil and -1 or 1
+		else
+			ordering = compare_alphabetical(av, bv, pref.sort_sensitive)
+		end
+	elseif by == "alphabetical" then
+		ordering = compare_alphabetical(a.name, b.name, pref.sort_sensitive)
+	elseif by == "natural" then
+		ordering = compare_natural(a.name, b.name, pref.sort_sensitive)
+	elseif by == "size" then
+		local av, bv = a.cha.len or 0, b.cha.len or 0
+		ordering = av == bv and 0 or av < bv and -1 or 1
+	end
+
+	if ordering == 0 then
+		if pref.sort_fallback == "natural" then
+			ordering = compare_natural(a.name, b.name, true)
+		else
+			ordering = compare_alphabetical(a.name, b.name, true)
+		end
+	end
+	return pref.sort_reverse and -ordering or ordering
+end
+
+---@param files File[]
+---@param pref KeepPreferencesPref
+local function sort_preview_files(files, pref)
+	if pref.sort_by == "none" then
+		return
+	elseif pref.sort_by == "random" then
+		for i = #files, 2, -1 do
+			local j = math.random(i)
+			files[i], files[j] = files[j], files[i]
+		end
+		if pref.sort_dir_first then
+			table.sort(files, function(a, b)
+				return a.cha.is_dir and not b.cha.is_dir
+			end)
+		end
+		return
+	end
+
+	table.sort(files, function(a, b)
+		return compare_files(a, b, pref) < 0
+	end)
+end
+
+---@param file File
+---@param mode string
+---@return ui.Line
+local function preview_linemode(file, mode)
+	if mode == "none" or mode == "solo" then
+		return ui.Line("")
+	elseif mode == "size" then
+		local ok, size = pcall(function()
+			return file:size()
+		end)
+		return ui.Line(" " .. ya.readable_size((ok and size) or file.cha.len or 0))
+	end
+
+	local linemode = Linemode:new(file)
+	local render = linemode[mode]
+	if type(render) ~= "function" then
+		return ui.Line(" " .. mode)
+	end
+
+	local line = ui.Line(render(linemode))
+	if line:width() == 0 then
+		return line
+	end
+	return ui.Line({ " ", line })
+end
+
+---@param file File
+---@return { text: string, style: ui.Style }?
+local function preview_icon(file)
+	local icons = th and th.icon
+	if icons and type(icons.match) == "function" then
+		return icons:match(file)
+	end
+	return file:icon()
+end
+
+---Render a bare `File` returned by `fs.read_dir()`.
+---`Entity` requires manager-context fields that bare files do not have.
+---@param file File
+---@return ui.Line
+local function preview_entity(file)
+	local parts = { " " }
+	local icon = preview_icon(file)
+	if icon then
+		parts[#parts + 1] = ui.Span(icon.text .. " "):style(icon.style)
+	end
+	parts[#parts + 1] = ui.printable(file.name)
+	if file.link_to then
+		parts[#parts + 1] = " -> " .. ui.printable(tostring(file.link_to))
+	end
+	return ui.Line(parts)
+end
+
+---Render preview rows in Yazi's sync UI context, where preset components are available.
+---@param _ table Plugin state provided by `ya.sync`.
+---@param job { area: ui.Rect, file: File, skip: integer }
+---@param files File[]
+---@param pref KeepPreferencesPref
+local render_preview = ya.sync(function(_, job, files, pref)
+	local contextual = {}
+	local folder = cx.active.preview.folder
+	if folder and folder.cwd == job.file.url then
+		for _, file in ipairs(folder.files) do
+			contextual[tostring(file.url)] = file
+		end
+	end
+
+	local left, right = {}, {}
+	for i = job.skip + 1, math.min(job.skip + job.area.h, #files) do
+		local file = files[i]
+		local display = contextual[tostring(file.url)]
+		local entity
+		if display then
+			entity = Entity:new(display)
+			left[#left + 1] = entity:redraw()
+		else
+			left[#left + 1] = preview_entity(file)
+		end
+		right[#right + 1] = preview_linemode(display or file, pref.linemode)
+
+		local max = math.max(0, job.area.w - right[#right]:width())
+		left[#left]:truncate({ max = max, ellipsis = entity and entity:ellipsis(max) or "…" })
+	end
+
+	ya.preview_widget(job, {
+		ui.List(left):area(job.area),
+		ui.Text(right):area(job.area):align(ui.Align.RIGHT),
+	})
+end)
 
 ---Initialize default preferences and cache buckets.
 ---The default preference is intentionally copied from `rt.mgr`, so unvisited directories
@@ -696,6 +1025,46 @@ function M:setup(opts)
 	ps.sub("ind-sort", remember_sort)
 	ps.sub("key-hidden", remember_hidden)
 	ps.sub("ind-hidden", remember_hidden)
+end
+
+---Render a directory preview using the previewed directory's own cached/path preferences.
+---@param job { area: ui.Rect, file: File, skip: integer }
+function M:peek(job)
+	local pref = pref_for_preview(url_key(job.file.url))
+	local files, err = fs.read_dir(job.file.url, { resolve = true, limit = math.maxinteger })
+	if not files then
+		return ya.preview_widget(
+			job,
+			ui.Text("Error: " .. tostring(err)):area(job.area):align(ui.Align.CENTER):wrap(ui.Wrap.YES)
+		)
+	end
+
+	local visible = {}
+	for _, file in ipairs(files) do
+		if pref.show_hidden or not file.cha.is_hidden then
+			visible[#visible + 1] = file
+		end
+	end
+	sort_preview_files(visible, pref)
+
+	local bound = math.max(0, #visible - job.area.h)
+	if job.skip > bound then
+		return ya.emit("peek", { bound, only_if = job.file.url, upper_bound = true })
+	elseif #visible == 0 then
+		return ya.preview_widget(job, ui.Text("No items"):area(job.area):align(ui.Align.CENTER))
+	end
+
+	render_preview(job, visible, pref)
+end
+
+---Scroll the preference-aware directory preview.
+---@param job { area: ui.Rect, file: File, units: integer }
+function M:seek(job)
+	local step = math.floor(job.units * job.area.h / 10)
+	ya.emit("peek", {
+		math.max(0, preview_skip() + step),
+		only_if = job.file.url,
+	})
 end
 
 return M
